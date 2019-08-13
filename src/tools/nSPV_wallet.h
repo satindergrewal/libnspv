@@ -132,7 +132,7 @@ bits256 NSPV_sapling_sighash(btc_tx *tx,int32_t vini,int64_t spendamount,uint8_t
     return(bits256_rev(sigtxid));
 }
 
-int32_t NSPV_validatehdrs(btc_spv_client *client,struct NSPV_ntzsproofresp *ptr)
+int32_t NSPV_validatehdrs(btc_spv_client *client,struct NSPV_ntzsproofresp *ptr, struct NSPV_ntzsresp *notarizations)
 {
     int32_t i,height,txidht; btc_tx *tx; bits256 blockhash,txid,desttxid;
     if ( (ptr->common.nextht-ptr->common.prevht+1) != ptr->common.numhdrs )
@@ -140,14 +140,14 @@ int32_t NSPV_validatehdrs(btc_spv_client *client,struct NSPV_ntzsproofresp *ptr)
         fprintf(stderr,"next.%d prev.%d -> %d vs %d\n",ptr->common.nextht,ptr->common.prevht,ptr->common.nextht-ptr->common.prevht+1,ptr->common.numhdrs);
         return(-2);
     }
-    else if ( (tx= NSPV_txextract(ptr->nextntz,ptr->nexttxlen)) == 0 )
+    else if ( ptr->nexttxlen == 0 || (tx= NSPV_txextract(ptr->nextntz,ptr->nexttxlen)) == 0 )
         return(-3);
     else if ( bits256_cmp(NSPV_tx_hash(tx),ptr->nexttxid) != 0 )
     {
         btc_tx_free(tx);
         return(-4);
     }
-    else if ( NSPV_notarizationextract(client,1,&height,&blockhash,&desttxid,tx) < 0 )
+    else if ( NSPV_notarizationextract(client,1,&height,&blockhash,&desttxid,tx,notarizations->nextntz.timestamp) < 0 )
     {
         btc_tx_free(tx);
         return(-5);
@@ -171,14 +171,14 @@ int32_t NSPV_validatehdrs(btc_spv_client *client,struct NSPV_ntzsproofresp *ptr)
             return(-i-13);
     }
     sleep(1); // need this to get past the once per second rate limiter per message
-    if ( (tx= NSPV_txextract(ptr->prevntz,ptr->prevtxlen)) == 0 )
+    if (  ptr->prevtxlen == 0 || (tx= NSPV_txextract(ptr->prevntz,ptr->prevtxlen)) == 0 )
         return(-8);
     else if ( bits256_cmp(NSPV_tx_hash(tx),ptr->prevtxid) )
     {
         btc_tx_free(tx);
         return(-9);
     }
-    else if ( NSPV_notarizationextract(client,1,&height,&blockhash,&desttxid,tx) < 0 )
+    else if ( NSPV_notarizationextract(client,1,&height,&blockhash,&desttxid,tx,notarizations->prevntz.timestamp) < 0 )
     {
         btc_tx_free(tx);
         return(-10);
@@ -203,7 +203,7 @@ btc_tx *NSPV_gettransaction(btc_spv_client *client,int32_t *retvalp,int32_t isKM
     *retvalp = skipvalidation != 0 ? 0 : -1;
     if ( (ptr= NSPV_txproof_find(txid,height)) == 0 )
     {
-        NSPV_txproof(client,v,txid,height);
+        NSPV_txproof(1,client,v,txid,height);
         ptr = &NSPV_txproofresult;
     }
     if ( bits256_cmp(ptr->txid,txid) != 0 )
@@ -211,7 +211,7 @@ btc_tx *NSPV_gettransaction(btc_spv_client *client,int32_t *retvalp,int32_t isKM
         fprintf(stderr,"txproof error %s != %s\n",bits256_str(str,ptr->txid),bits256_str(str2,txid));
         return(0);
     }
-    else if ( (tx= NSPV_txextract(ptr->tx,ptr->txlen)) == 0 )
+    else if ( ptr->txlen == 0 || (tx= NSPV_txextract(ptr->tx,ptr->txlen)) == 0 )
         return(0);
     else if ( bits256_cmp(NSPV_tx_hash(tx),txid) != 0 )
     {
@@ -241,6 +241,12 @@ btc_tx *NSPV_gettransaction(btc_spv_client *client,int32_t *retvalp,int32_t isKM
             memcpy(proof->str,ptr->txproof,ptr->txprooflen);
             proof->len = ptr->txprooflen;
         }
+        if ( proof == NULL )
+        {
+            fprintf(stderr, "proof is missing, try a higher block height\n");
+            *retvalp = -2006;
+            return(tx);
+        }
         NSPV_notarizations(client,height); // gets the prev and next notarizations
         if ( NSPV_inforesult.notarization.height >= height && (NSPV_ntzsresult.prevntz.height == 0 || NSPV_ntzsresult.prevntz.height >= NSPV_ntzsresult.nextntz.height) )
         {
@@ -259,7 +265,7 @@ btc_tx *NSPV_gettransaction(btc_spv_client *client,int32_t *retvalp,int32_t isKM
                 NSPV_txidhdrsproof(client,NSPV_ntzsresult.prevntz.txid,NSPV_ntzsresult.nextntz.txid);
                 usleep(10000);
                 //fprintf(stderr,"call validate prooflen.%d\n",(int32_t)proof->len);
-                if ( (*retvalp= NSPV_validatehdrs(client,&NSPV_ntzsproofresult)) == 0 )
+                if ( (*retvalp= NSPV_validatehdrs(client,&NSPV_ntzsproofresult, &NSPV_ntzsresult)) == 0 )
                 {
                     uint256 mroot,revtxid; merkle_block MB; vector *vmatch;
                     init_mblock(&MB);
@@ -518,7 +524,7 @@ cstring *NSPV_signtx(btc_spv_client *client,int32_t isKMD,int64_t *rewardsump,in
 
 cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t satoshis)
 {
-    cJSON *result = cJSON_CreateObject(),*retcodes = cJSON_CreateArray(); uint8_t *ptr,rmd160[128]; int32_t len,isKMD = 0; int64_t txfee = 10000; cstring *scriptPubKey=0,*hex=0; btc_tx *mtx=0,*tx=0; struct NSPV_utxoresp used[NSPV_MAXVINS]; int64_t rewardsum=0,interestsum=0;
+    cJSON *result = cJSON_CreateObject(),*retcodes = cJSON_CreateArray(); uint8_t *ptr,rmd160[128]; int32_t len,isKMD = 0; int64_t totalinputs,change,txfee = 10000; cstring *scriptPubKey=0,*hex=0; btc_tx *mtx=0,*tx=0; struct NSPV_utxoresp used[NSPV_MAXVINS]; char numstr[64]; int64_t rewardsum=0,interestsum=0;
     if ( NSPV_logintime == 0 || time(NULL) > NSPV_logintime+NSPV_AUTOLOGOUT )
     {
         jaddstr(result,"result","error");
@@ -539,7 +545,7 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
         return(result);
     }
     if ( NSPV_utxosresult.CCflag != 0 || strcmp(NSPV_utxosresult.coinaddr,srcaddr) != 0 || NSPV_utxosresult.nodeheight < NSPV_inforesult.height )
-        NSPV_addressutxos(client,srcaddr,0,0,0);
+        NSPV_addressutxos(1,client,srcaddr,0,0,0);
     if ( NSPV_utxosresult.CCflag != 0 || strcmp(NSPV_utxosresult.coinaddr,srcaddr) != 0 || NSPV_utxosresult.nodeheight < NSPV_inforesult.height )
     {
         jaddstr(result,"result","error");
@@ -587,8 +593,9 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
     if ( isKMD != 0 )
         mtx->locktime = (uint32_t)time(NULL) - 777;
     memset(used,0,sizeof(used));
-    if ( NSPV_addinputs(used,mtx,satoshis+txfee,64,NSPV_utxosresult.utxos,NSPV_utxosresult.numutxos) > 0 )
+    if ( (totalinputs= NSPV_addinputs(used,mtx,satoshis+txfee,64,NSPV_utxosresult.utxos,NSPV_utxosresult.numutxos)) > 0 )
     {
+        change = totalinputs - (satoshis + txfee);
         btc_tx_add_txout(mtx,satoshis,scriptPubKey);
         if ( NSPV_logintime == 0 || time(NULL) > NSPV_logintime+NSPV_AUTOLOGOUT )
         {
@@ -600,7 +607,6 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
         hex = NSPV_signtx(client,isKMD,&rewardsum,&interestsum,retcodes,mtx,txfee,used);
         if ( isKMD != 0 )
         {
-            char numstr[64];
             sprintf(numstr,"%.8f",(double)interestsum/COIN);
             jaddstr(result,"rewards",numstr);
             sprintf(numstr,"%.8f",(double)rewardsum/COIN);
@@ -610,6 +616,13 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
         {
             if ( (tx= btc_tx_decodehex(hex->str)) != 0 )
             {
+                sprintf(numstr,"%.8f",(double)txfee/COIN);
+                jaddstr(result,"txfee",numstr);
+                sprintf(numstr,"%.8f",(double)totalinputs/COIN);
+                jaddstr(result,"total",numstr);
+                sprintf(numstr,"%.8f",(double)change/COIN);
+                jaddstr(result,"change",numstr);
+                jaddbits256(result,"txid",NSPV_tx_hash(tx));
                 jadd(result,"tx",btc_tx_to_json(tx));
                 jaddstr(result,"result","success");
                 jaddstr(result,"hex",hex->str);
@@ -629,7 +642,8 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
             jaddstr(result,"error","signing error");
         }
         btc_tx_free(mtx);
-        btc_tx_free(tx);
+        if ( tx != 0 )
+            btc_tx_free(tx);
         cstr_free(hex,1);
         jaddstr(result,"lastpeer",NSPV_lastpeer);
         return(result);
@@ -658,7 +672,7 @@ int64_t NSPV_AddNormalinputs(CMutableTransaction &mtx,CPubKey mypk,int64_t total
         Getscriptaddress(coinaddr,CScript() << ParseHex(HexStr(mypk)) << OP_CHECKSIG);
         if ( strcmp(ptr->U.coinaddr,coinaddr) != 0 )
         {
-            NSPV_addressutxos(coinaddr,CCflag,0,0);
+            NSPV_addressutxos(1,coinaddr,CCflag,0,0);
             NSPV_utxosresp_purge(&ptr->U);
             NSPV_utxosresp_copy(&ptr->U,&NSPV_utxosresult);
         }
@@ -718,13 +732,13 @@ void NSPV_txids2CCtxids(struct NSPV_txidsresp *ptr,std::vector<std::pair<CAddres
 
 void NSPV_CCunspents(std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue> > &outputs,char *coinaddr,bool ccflag)
 {
-    NSPV_addressutxos(coinaddr,ccflag,0,0);
+    NSPV_addressutxos(1,coinaddr,ccflag,0,0);
     NSPV_utxos2CCunspents(&NSPV_utxosresult,outputs);
 }
 
 void NSPV_CCtxids(std::vector<std::pair<CAddressIndexKey, CAmount> > &txids,char *coinaddr,bool ccflag)
 {
-    NSPV_addresstxids(coinaddr,ccflag,0,0);
+    NSPV_addresstxids(1,coinaddr,ccflag,0,0);
     NSPV_txids2CCtxids(&NSPV_txidsresult,txids);
 }
 #endif

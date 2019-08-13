@@ -108,6 +108,7 @@ void spv_sync_completed(btc_spv_client* client) {
 
 #include "nSPV_utils.h"
 #include "nSPV_structs.h"
+#include "nSPV_CCtx.h"
 #include "nSPV_superlite.h"
 #include "nSPV_wallet.h"
 #include "komodo_cJSON.c"
@@ -115,11 +116,13 @@ void spv_sync_completed(btc_spv_client* client) {
 
 /*
  Todo:
- new apis: getpeerinfo
- make some way to add peers dynamically
- params:[] array -> map to fields
- cc/funcid filter in listtransactions/listunspent
--merkleproof -> dimxy
+add check for p2sh in script_to_address
+ mempool tracking of balance
+ mempool based pruning of utxos
+ 
+ cross chain superwallet (jaragua) -> blackjok3r
+ 
+ enhance cc/funcid filter in listtransactions/listunspent -> mihailo
  
  */
 
@@ -144,6 +147,8 @@ const btc_chainparams *NSPV_coinlist_scan(char *symbol,const btc_chainparams *te
                 {
                     if ( (seeds= jstr(coin,"nSPV")) != 0 && strlen(seeds) < sizeof(chain->dnsseeds[0].domain)-1 && (magic= jstr(coin,"magic")) != 0 && strlen(magic) == 8 )
                     {
+                        if ( jstr(coin,"fname") != 0 )
+                            strcpy(NSPV_fullname,jstr(coin,"fname"));
                         chain->default_port = juint(coin,"p2p");
                         chain->rpcport = juint(coin,"rpcport");
                         strcpy(chain->dnsseeds[0].domain,seeds);
