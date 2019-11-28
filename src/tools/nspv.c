@@ -68,7 +68,7 @@ static void print_version()
 static void print_usage()
 {
     print_version();
-    printf("Usage: nspv [COIN defaults to NSPV] (-c|continuous) (-i|-ips <ip,ip,...]>) (-m[--maxpeers] <int>) (-t[--testnet]) (-f <headersfile|0 for in mem only>) (-p <rpcport>) (-r[--regtest]) (-d[--debug]) (-x=<externalip>) (-l=langauge) (-s[--timeout] <secs>) <command>\n");
+    printf("Usage: nspv [COIN defaults to NSPV] (-c|continuous) (-i|-ips <ip,ip,...]>) (-m[--maxpeers] <int>) (-t[--testnet]) (-f <headersfile|0 for in mem only>) (-p <rpcport>) (-r[--regtest]) (-d[--debug]) (-x=<externalip>) (-l=language) (-s[--timeout] <secs>) <command>\n");
     printf("Supported commands:\n");
     printf("        scan      (scan blocks up to the tip, creates header.db file)\n");
     printf("\nExamples: \n");
@@ -107,11 +107,11 @@ void spv_sync_completed(btc_spv_client* client) {
 }
 
 #include "tweetnacl.c"
+#include "curve25519.c"
 #include "nSPV_utils.h"
 #include "nSPV_structs.h"
 #include "nSPV_CCtx.h"
-#include "curve25519.c"
-#include "nSPV_jpeg.h"
+//#include "nSPV_jpeg.h"
 #include "nSPV_superlite.h"
 #include "nSPV_wallet.h"
 #include "nSPV_htmlgui.h"
@@ -120,7 +120,7 @@ void spv_sync_completed(btc_spv_client* client) {
 
 const btc_chainparams *NSPV_coinlist_scan(char *symbol,const btc_chainparams *template)
 {
-    btc_chainparams *chain = 0; char *filestr,*name,*seeds,*magic; int32_t i,n; cJSON *array,*coin; long filesize;
+    btc_chainparams *chain = 0; char *filestr,*name,*seeds,*magic=0; int32_t i,n; cJSON *array,*coin; long filesize;
     chain = calloc(1,sizeof(*chain));
     memcpy(chain,template,sizeof(*chain));
     chain->default_port = 0;
@@ -137,14 +137,16 @@ const btc_chainparams *NSPV_coinlist_scan(char *symbol,const btc_chainparams *te
                 //fprintf(stderr,"%s\n",jprint(coin,0));
                 if ( (name= jstr(coin,"coin")) != 0 && strcmp(name,symbol) == 0 && jstr(coin,"asset") != 0 )
                 {
-                    if ( (seeds= jstr(coin,"nSPV")) != 0 && strlen(seeds) < sizeof(chain->dnsseeds[0].domain)-1 && (magic= jstr(coin,"magic")) != 0 && strlen(magic) == 8 )
+                    if ( (seeds= jstr(coin,"nSPV")) != 0 && strlen(seeds) < sizeof(chain->dnsseeds[0].domain)-1 && (magic=jstr(coin,"magic")) != 0 && strlen(magic) == 8 )
                     {
                         if ( jstr(coin,"fname") != 0 )
                             strcpy(NSPV_fullname,jstr(coin,"fname"));
                         chain->default_port = juint(coin,"p2p");
                         chain->rpcport = juint(coin,"rpcport");
                         strcpy(chain->dnsseeds[0].domain,seeds);
-                        decode_hex((uint8_t *)chain->netmagic,4,magic);
+                        char tmp[9];
+                        strcpy(tmp,magic);
+                        decode_hex((uint8_t *)chain->netmagic,4,tmp);
                         strcpy(chain->name,symbol);
                         fprintf(stderr,"Found (%s) magic.%s, p2p.%u seeds.(%s)\n",symbol,magic,chain->default_port,seeds);
                         break;
@@ -156,7 +158,7 @@ const btc_chainparams *NSPV_coinlist_scan(char *symbol,const btc_chainparams *te
                 free(chain);
                 chain = 0;
             }
-            free(array);
+            cJSON_Delete(array);
         }
         else
         {
@@ -296,7 +298,8 @@ int main(int argc, char* argv[])
         fprintf(stderr," genesisblockhash %s\n",chain->name);
         data = (char *)"scan";
     }
-    if ( OS_thread_create(malloc(sizeof(pthread_t)),NULL,NSPV_rpcloop,(void *)&port) != 0 )
+    pthread_t thread;
+    if ( OS_thread_create(&thread,NULL,NSPV_rpcloop,(void *)&port) != 0 )
     {
         printf("error launching NSPV_rpcloop for port.%u\n",port);
         exit(-1);
@@ -364,6 +367,13 @@ int main(int argc, char* argv[])
             btc_spv_client_runloop(client);
             printf("end of client runloop\n");
             btc_spv_client_free(client);
+			NSPV_STOP_RECEIVED = (uint32_t)time(NULL);
+#if !defined(__ANDROID__) && !defined(ANDROID)
+			// no pthread_cancel in Android NDK
+			// actually no need to pthread_cancel if NSPV_STOP_RECEIVED is used to finishe the thread, 
+			// it is sufficient just to wait for the thread end in pthread_join
+            pthread_cancel(thread); 
+#endif
             ret = EXIT_SUCCESS;
         }
         btc_ecc_stop();
@@ -373,5 +383,6 @@ int main(int argc, char* argv[])
         printf("Invalid command (use -?)\n");
         ret = EXIT_FAILURE;
     }
+    pthread_join(thread,NULL);
     return ret;
 }

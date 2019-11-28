@@ -536,7 +536,7 @@ char *NSPV_expand_variables(char *bigbuf,char *filestr,char *method,cJSON *argjs
             //
             if ( strcmp(NSPV_address,NSPV_txidsresult.coinaddr) == 0 )
             {
-                itemsbuf = calloc(NSPV_txidsresult.numtxids+1,1024);
+                itemsbuf = calloc(NSPV_txidsresult.numtxids+1,2048);
                 for (i=NSPV_txidsresult.numtxids-1; i>=0; i--)
                 {
                     if ( i < NSPV_txidsresult.numtxids-1000 )
@@ -740,6 +740,7 @@ char *NSPV_JSON(cJSON *argjson,char *remoteaddr,uint16_t port,char *filestr,int3
                             free(filestr);
                             filestr = OS_filestr(&fsize,"html/wallet");
                             method = "wallet";
+#ifdef ENABLE_JPEG
                             if ( (0) )
                             {
                                 char srcstr[512],*retstr,*passphrase = "secret"; uint16_t ind; int32_t power2=3,len = (int32_t)strlen(NSPV_wifstr);
@@ -758,7 +759,7 @@ char *NSPV_JSON(cJSON *argjson,char *remoteaddr,uint16_t port,char *filestr,int3
                                     }
                                 }
                             }
-
+#endif
                         } else fprintf(stderr,"login error with wif.(%s)\n",wifstr);
                         memset(wifstr,0,strlen(wifstr));
                         free_json(retjson);

@@ -36,7 +36,7 @@ cJSON *NSPV_txproof(int32_t waitflag,btc_spv_client *client,int32_t vout,bits256
 void expand_ipbits(char *ipaddr,uint64_t ipbits);
 btc_tx *NSPV_gettransaction(btc_spv_client *client,int32_t *retvalp,int32_t isKMD,int32_t skipvalidation,int32_t v,bits256 txid,int32_t height,int64_t extradata,uint32_t tiptime,int64_t *rewardsump);
 
-uint32_t NSPV_logintime,NSPV_tiptime,NSPV_didfirstutxos,NSPV_didfirsttxids;
+uint32_t NSPV_logintime,NSPV_tiptime,NSPV_didfirstutxos,NSPV_didfirsttxids,NSPV_lastgetinfo;
 int32_t NSPV_didfirsttxproofs,NSPV_longestchain=0;
 char NSPV_tmpseed[4096],NSPV_walletseed[4096],NSPV_lastpeer[64],NSPV_address[64],NSPV_wifstr[64],NSPV_pubkeystr[67],NSPV_symbol[64],NSPV_fullname[64];
 char NSPV_language[64] = { "english" };
@@ -56,6 +56,7 @@ struct NSPV_ntzsresp NSPV_ntzsresult;
 struct NSPV_ntzsproofresp NSPV_ntzsproofresult;
 struct NSPV_txproof NSPV_txproofresult;
 struct NSPV_broadcastresp NSPV_broadcastresult;
+struct NSPV_remoterpcresp NSPV_remoterpcresult;
 
 struct NSPV_ntzsresp NSPV_ntzsresp_cache[NSPV_MAXVINS];
 struct NSPV_ntzsproofresp NSPV_ntzsproofresp_cache[NSPV_MAXVINS * 2];
@@ -241,7 +242,7 @@ int32_t validate_headers(bits256 fromblockhash)
     return ( bits256_cmp(NSPV_blockheaders[bestindex].blockhash, NSPV_lastntz.blockhash) == 0 );
 }
 
-int32_t haveblock(int32_t ht)
+int32_t havehdrht(int32_t ht)
 {
     for (int32_t i = 0; i < NSPV_num_headers; i++) 
         if ( NSPV_blockheaders[i].height == ht )
@@ -317,7 +318,7 @@ void komodo_nSPVresp(btc_node *from,uint8_t *response,int32_t len)
                 if  ( from->version < NSPV_PROTOCOL_VERSION )
                 {
                     from->banscore += 11;
-                    fprintf(stderr,"[%i] %s is old version.%d < %d \n",NSPV_inforesult.height,from->ipaddr,from->version, NSPV_PROTOCOL_VERSION);
+                    fprintf(stderr,"[NODE:%i] %s is old version.%d < %d \n",from->nodeid,from->ipaddr,from->version, NSPV_PROTOCOL_VERSION);
                     return;
                 }
                 // insert block header into array 
@@ -326,10 +327,10 @@ void komodo_nSPVresp(btc_node *from,uint8_t *response,int32_t len)
                     // empty half the array to prevent trying to over fill it. 
                     if ( NSPV_num_headers == NSPV_MAX_BLOCK_HEADERS )
                     {
-                        fprintf(stderr, "array of headers is full, emptying blocks before height.%i\n", I.height-(NSPV_MAX_BLOCK_HEADERS>>1));
+                        fprintf(stderr, "array of headers is full,clearing before height.%i\n", I.height-(NSPV_MAX_BLOCK_HEADERS>>1));
                         reset_headers(I.height-(NSPV_MAX_BLOCK_HEADERS>>1));
                     }
-                    //fprintf(stderr, "added  block.%i\n",  NSPV_inforesult.hdrheight);
+                    //fprintf(stderr, "added  block.%i\n", NSPV_inforesult.hdrheight);
                     NSPV_blockheaders[NSPV_num_headers].height = NSPV_inforesult.hdrheight;
                     NSPV_blockheaders[NSPV_num_headers].blockhash = hdrhash;
                     NSPV_blockheaders[NSPV_num_headers].hashPrevBlock = NSPV_inforesult.H.hashPrevBlock;
@@ -337,19 +338,18 @@ void komodo_nSPVresp(btc_node *from,uint8_t *response,int32_t len)
                 }
                 if ( (lag= I.height-NSPV_inforesult.height) > 0 )
                 {
-                    fprintf(stderr,"got old info response %u size.%d height.%d lag.%i\n",timestamp,len,NSPV_inforesult.height,lag);
                     NSPV_inforesp_purge(&NSPV_inforesult);
                     NSPV_inforesult = I;
                     if ( IS_IN_SYNC == 1 && lag > 2 )
                     {
                         from->banscore += lag;
-                        fprintf(stderr, "[%i] is not in sync lag.%i, banscore.%i\n",from->nodeid, lag, from->banscore);
+                        fprintf(stderr, "[NODE:%i] is not in sync lag.%i, banscore.%i\n",from->nodeid, lag, from->banscore);
                     }
                 }
                 else
                 {
                     if ( NSPV_inforesult.height > I.height )
-                        fprintf(stderr, "[%i] currentht.%i hdrheight.%i last ntz.%i esthdrleft.%i\n",from->nodeid, NSPV_lastntz.height, NSPV_inforesult.height, NSPV_inforesult.hdrheight, check_headers(1));
+                        fprintf(stderr, "[NODE:%i] ht.%i hdrheight.%i lastntzht.%i esthdrleft.%i\n",from->nodeid, NSPV_inforesult.height, NSPV_inforesult.hdrheight, NSPV_lastntz.height, check_headers(1));
                     // fetch the notarization tx to validate it when it arives. 
                     if ( NSPV_lastntz.height < NSPV_inforesult.notarization.height )
                     {
@@ -363,24 +363,23 @@ void komodo_nSPVresp(btc_node *from,uint8_t *response,int32_t len)
                     // if we have enough headers and they validate back to the last notarization update the tiptime/synced chain status
                     if ( check_headers(0) == 0 && validate_headers(NSPV_inforesult.blockhash) != 0 )
                     {
-                        //fprintf(stderr, "[%i]: synced at height.%i \n",from->nodeid, NSPV_inforesult.height);
+                        //fprintf(stderr, "[NODE:%i] validated header at height.%i \n",from->nodeid, NSPV_inforesult.height);
                         NSPV_tiptime = NSPV_inforesult.H.nTime;
                         IS_IN_SYNC = 1;
                         if ( NSPV_inforesult.height > (int32_t)from->bestknownheight )
                             from->bestknownheight = NSPV_inforesult.height;
                         if ( NSPV_inforesult.height > NSPV_longestchain )
                         {
-                            fprintf(stderr, "[%i]>>>>>>>>>> FOUND LONGEST CHAIN %i in %us\n",from->nodeid, NSPV_inforesult.height, (uint32_t)time(NULL)-starttime);
+                            fprintf(stderr, ">>>>>>>>>> longestchain.%i fromnode.%i runtime.%us\n",NSPV_inforesult.height,from->nodeid,(uint32_t)time(NULL)-starttime);
                             NSPV_longestchain = NSPV_inforesult.height;
                         }
                     } 
                     else if ( IS_IN_SYNC == 1 )
                     {
-                        // this is for reorgs, we dont update the chain tip if it cannot be linked back to last nota.
-                        // we do keep the block in the array though incase it becomes main chain later.
+                        // we dont update the chain tip if it cannot be linked back to last notarization
                         NSPV_inforesp_purge(&NSPV_inforesult);
                         NSPV_inforesult = I;
-                        // set in sync false, so we can try and fetch more previous blocks to get back in sync. 
+                        // set in sync false, so we can try and fetch more previous headers to get back in sync. 
                         IS_IN_SYNC = 0;
                     }
                     else IS_IN_SYNC = 0;
@@ -461,6 +460,11 @@ void komodo_nSPVresp(btc_node *from,uint8_t *response,int32_t len)
                 NSPV_rwbroadcastresp(0,&response[1],&NSPV_broadcastresult);
                 fprintf(stderr,"got broadcast response %u size.%d %s retcode.%d\n",timestamp,len,bits256_str(str,NSPV_broadcastresult.txid),NSPV_broadcastresult.retcode);
                 break;
+            case NSPV_REMOTERPCRESP:
+                NSPV_remoterpc_purge(&NSPV_remoterpcresult);
+                NSPV_rwremoterpcresp(0,&response[1],&NSPV_remoterpcresult,len-1);
+                fprintf(stderr,"got remoterpc response %u size.%d %s\n",timestamp,len,NSPV_remoterpcresult.method);
+                break;
             default: fprintf(stderr,"unexpected response %02x size.%d at %u\n",response[0],len,timestamp);
                 break;
         }
@@ -514,7 +518,7 @@ cJSON *NSPV_getpeerinfo(btc_spv_client *client)
     return(result);
 }
 
-cJSON *NSPV_gettransaction2(btc_spv_client *client,bits256 txid,int32_t v,int32_t height)
+btc_tx *NSPV_gettx(btc_spv_client *client,bits256 txid,int32_t v,int32_t height)
 {
     int32_t retval = 0, isKMD, skipvalidation = 0; int64_t extradata = 0; int64_t rewardsum = 0; btc_tx* tx = NULL;
     cJSON *result = cJSON_CreateObject();
@@ -522,16 +526,32 @@ cJSON *NSPV_gettransaction2(btc_spv_client *client,bits256 txid,int32_t v,int32_
     if ( height == 0 )
         height = NSPV_lastntz.height;
     tx = NSPV_gettransaction(client,&retval,isKMD,skipvalidation,v,txid,height,extradata,NSPV_tiptime,&rewardsum);
+    return(tx);
+}
+
+cJSON *NSPV_gettransaction2(btc_spv_client *client,bits256 txid,int32_t v,int32_t height)
+{
+    int32_t retval = 0; int64_t rewardsum = 0; cJSON *result = cJSON_CreateObject(); btc_tx *tx;
+
+    tx = NSPV_gettx(client,txid,v,height);
     if ( tx == NULL )
     {
         jaddstr(result,"result","error");
         jaddstr(result,"error","could not get tx.");
     }
-    cstring *txhex = btc_tx_to_cstr(tx);
-    jaddstr(result, "hex", txhex->str);
-    jaddnum(result, "retcode", (int64_t)retval);
-    if (rewardsum > 0 )
-        jaddnum(result, "rewards", (int64_t)rewardsum);
+    else
+    {
+        cstring *txhex = btc_tx_to_cstr(tx);
+        if ( txhex != 0 )
+        {
+            jaddstr(result, "hex", txhex->str);
+            cstr_free(txhex, true);
+        }
+        else jaddstr(result, "hex", "couldnt decode tx");
+        jaddnum(result, "retcode", (int64_t)retval);
+        if (rewardsum > 0 )
+            jaddnum(result, "rewards", (int64_t)rewardsum);
+    }
     return(result);
 }
 
@@ -859,7 +879,7 @@ cJSON *NSPV_broadcast(btc_spv_client *client,char *hex)
     data = (uint8_t *)malloc(n);
     decode_hex(data,n,hex);
     txid = bits256_doublesha256(data,n);
-    msg = (uint8_t *)malloc(3 + sizeof(txid) + sizeof(n) + n);
+    msg = (uint8_t *)malloc(4 + sizeof(txid) + sizeof(n) + n);
     msg[0] = msg[1] = msg[2] = 0;
     msg[len++] = NSPV_BROADCAST;
     len += iguana_rwbignum(1,&msg[len],sizeof(txid),(uint8_t *)&txid);
@@ -886,6 +906,52 @@ cJSON *NSPV_broadcast(btc_spv_client *client,char *hex)
     memset(&B,0,sizeof(B));
     B.retcode = -2;
     return(NSPV_broadcast_json(&B,txid));
+}
+
+cJSON *NSPV_remoterpccall(btc_spv_client *client, char* method, cJSON *request)
+{
+    uint8_t *msg; int32_t i,iter,len,slen;
+    char *pubkey=utils_uint8_to_hex(NSPV_pubkey.pubkey,33);
+
+    jaddstr(request,"mypk",pubkey);
+    NSPV_remoterpc_purge(&NSPV_remoterpcresult);
+    char *json=cJSON_Print(request);
+    if (!json) return (NULL);
+    slen = (int32_t)strlen(json);
+    if (slen >254)
+    {
+        msg = (uint8_t *)malloc(4 + sizeof(slen) + slen);
+        len = 3;
+        msg[0] = msg[1] = msg[2] = 0;
+        msg[len++] = NSPV_REMOTERPC;
+    }
+    else
+    {
+         msg = (uint8_t *)malloc(2 + sizeof(slen) + slen);
+         msg[0]=0;
+         len = 1;
+         msg[len++] = NSPV_REMOTERPC;
+    }
+    len += iguana_rwnum(1,&msg[len],sizeof(slen),&slen);
+    memcpy(&msg[len],json,slen), len += slen;
+    free(json);
+    for (iter=0; iter<3; iter++)
+    if ( NSPV_req(client,0,msg,len,NODE_NSPV,NSPV_REMOTERPC>>1) != 0 )
+    {
+        for (i=0; i<NSPV_POLLITERS; i++)
+        {
+            usleep(NSPV_POLLMICROS);
+            if ( strcmp(NSPV_remoterpcresult.method,method) == 0)
+            {
+                cJSON *result=cJSON_Parse(NSPV_remoterpcresult.json);
+                NSPV_remoterpc_purge(&NSPV_remoterpcresult);
+                free(msg);
+                return(result);
+            }
+        }
+    } else sleep(1);
+    free(msg);
+    return (NULL);
 }
 
 cJSON *NSPV_login(const btc_chainparams *chain,char *wifstr)
@@ -936,7 +1002,9 @@ cJSON *NSPV_login(const btc_chainparams *chain,char *wifstr)
     jaddstr(result,"pubkey",NSPV_pubkeystr);
     jaddnum(result,"wifprefix",(int64_t)data[0]);
     jaddnum(result,"compressed",(int64_t)(data[sz-5] == 1));
-    fprintf(stderr,"result (%s)\n",jprint(result,0));
+    char *res=jprint(result,0);
+    fprintf(stderr,"result (%s)\n",res);
+    free(res);
     memset(data,0,sizeof(data));
     return(result);
 }
@@ -1104,7 +1172,7 @@ cJSON *NSPV_getnewaddress(const btc_chainparams *chain,char *lang)
 int32_t NSPV_periodic(btc_node *node) // called periodically
 {
     static uint32_t lasttxproof; 
-    cJSON *retjson; char str[65]; struct NSPV_utxoresp *up; uint8_t msg[512]; int32_t i,k,len = 1; uint32_t timestamp = (uint32_t)time(NULL);
+    cJSON *retjson; char str[65]; struct NSPV_utxoresp *up; uint8_t msg[512]; int32_t i,k,len = 1; uint32_t timestamp = (uint32_t)time(NULL), delay;
     btc_spv_client *client = (btc_spv_client*)node->nodegroup->ctx;
     if ( NSPV_logintime != 0 && timestamp > NSPV_logintime+NSPV_AUTOLOGOUT )
         NSPV_logout();
@@ -1157,14 +1225,18 @@ int32_t NSPV_periodic(btc_node *node) // called periodically
                 NSPV_didfirsttxproofs = -1;
         }
     }
-    k = (IS_IN_SYNC == 0)+(node->nodegroup->desired_amount_connected_nodes/(node->nodegroup->NSPV_num_connected_nodes > 0 ? node->nodegroup->NSPV_num_connected_nodes : 1));
-    k = (k == 0 ? 1 : k);
-    if ( timestamp > (node->lastgetinfo+((client->chainparams->blocktime/4)*(2+(IS_IN_SYNC != 0)))+(rand()%(client->chainparams->blocktime/k))) )
+    k = node->nodegroup->NSPV_num_connected_nodes < (node->nodegroup->desired_amount_connected_nodes>>2) ? 2 : 1;
+    delay = (client->chainparams->blocktime>>1) + ((rand()%(client->chainparams->blocktime>>k))*(IS_IN_SYNC+1));
+    
+    if ( IS_IN_SYNC != 0 && timestamp < NSPV_lastgetinfo+30 && (int32_t)node->bestknownheight > NSPV_longestchain-2 )
+        return(0);
+        
+    if ( timestamp > node->lastgetinfo+delay )
     {
-        int32_t reqht = 0, j = 0, n = 0; static int32_t didinit = 0;
-        if ( NSPV_lastntz.height > 0 )
+        int32_t reqht = 0, j = 0, n = 0, p = NSPV_hdrheight_counter; static int32_t didinit = 0;
+        if ( NSPV_lastntz.height > 0 && IS_IN_SYNC == 0 )
         {
-            n = NSPV_num_headers+5;
+            n = NSPV_num_headers+1;
             do
             {
                 if ( didinit == 0 )
@@ -1178,12 +1250,15 @@ int32_t NSPV_periodic(btc_node *node) // called periodically
                     NSPV_hdrheight_counter = update_hdr_counter(NSPV_hdrheight_counter);
                     j++;
                 }
-            } while ( j < n && haveblock(NSPV_hdrheight_counter) >= 0 );
-            if ( j == n )
-                NSPV_hdrheight_counter = update_hdr_counter(NSPV_hdrheight_counter);
-            reqht = NSPV_hdrheight_counter; 
-        }
-        fprintf(stderr,"[%i] getinfo for block: %i loops.%i NSPV_num_headers.%i \n",node->nodeid, reqht, j, NSPV_num_headers);
+                if ( j == n )
+                {
+                    NSPV_hdrheight_counter = update_hdr_counter(p);
+                    break;
+                }
+            } while ( havehdrht(NSPV_hdrheight_counter) >= 0 );
+            reqht = NSPV_hdrheight_counter;
+        } else NSPV_lastgetinfo = timestamp;
+        fprintf(stderr,"node.%i reqhdr.%i hdrtotal.%i delay.%u k.%i\n",node->nodeid, reqht, NSPV_num_headers, delay, k);
         len = 1;
         msg[len++] = NSPV_INFO;
         len += iguana_rwnum(1,&msg[len],sizeof(reqht),&reqht);
@@ -1227,7 +1302,6 @@ struct NSPV_methodarg NSPV_methods[] =
     { "spentinfo", { { "txid", NSPV_HASH }, { "vout", NSPV_UINT } } },
     { "spend", { { "address", NSPV_STR }, { "amount", NSPV_FLOAT } } },
     { "mempool", { { "address", NSPV_STR }, { "isCC", NSPV_UINT }, { "memfunc", NSPV_UINT }, { "txid", NSPV_HASH }, { "vout", NSPV_UINT }, { "evalcode", NSPV_UINT }, { "CCfunc", NSPV_UINT }, } },
-    { "faucetget", { "", 0 } },
     { "gettransaction", { { "txid", NSPV_HASH }, { "vout", NSPV_UINT }, { "height", NSPV_UINT } } },
 };
 
@@ -1320,12 +1394,13 @@ void NSPV_argjson_addfields(char *method,cJSON *argjson,cJSON *params)
             }
         }
     }
-    fprintf(stderr,"new argjson.(%s)\n",jprint(argjson,0));
+    //fprintf(stderr,"new argjson.(%s)\n",cJSON_Print(argjson));
 }
 
 cJSON *_NSPV_JSON(cJSON *argjson)
 {
-    char *method; bits256 txid; int64_t satoshis; char *symbol,*coinaddr,*wifstr,*hex; int32_t vout,prevheight,nextheight,skipcount,height,hdrheight,numargs; uint8_t CCflag,memfunc; cJSON *params;
+    char *method; bits256 txid; int64_t satoshis; char *symbol,*coinaddr,*wifstr,*hex;
+    int32_t vout,prevheight,nextheight,skipcount,height,hdrheight,numargs; uint8_t CCflag,memfunc; cJSON *params,*result,*req;
 //fprintf(stderr,"_NEW_JSON.(%s)\n",jprint(argjson,0));
     if ( (method= jstr(argjson,"method")) == 0 )
         return(cJSON_Parse("{\"error\":\"no method\"}"));
@@ -1446,9 +1521,23 @@ cJSON *_NSPV_JSON(cJSON *argjson)
         }
         return(NSPV_mempooltxids(NSPV_client,coinaddr,CCflag,memfunc,txid,vout));
     }
-    else if ( strcmp(method,"faucetget") == 0 )
-        return(NSPV_CC_faucetget());
-    else return(cJSON_Parse("{\"error\":\"invalid method\"}"));
+    else if ((req=NSPV_remoterpccall(NSPV_client,method,argjson))!=NULL)
+    {
+        cJSON *result=jobj(req,"result");
+        if (!cJSON_IsNull(result) && cJSON_HasObjectItem(result,"result") && strcmp(jstr(result,"result"),"success")==0 && (jstr(result,"hex"))!=0 && jobj(result,"SigData")!=NULL)
+        {     
+            cstring *hex=FinalizeCCtx(NSPV_client,result);
+            result=cJSON_CreateObject();
+            jaddstr(result,"result","success");
+            jaddstr(result,"hex",hex->str);
+            cstr_free(hex,1);
+            cJSON_Delete(req);  
+            return(result);
+        }
+        else return (req);
+    }
+    else
+        return(cJSON_Parse("{\"error\":\"invalid method\"}"));
 }
 
 #endif // KOMODO_NSPVSUPERLITE_H
