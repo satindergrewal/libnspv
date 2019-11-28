@@ -42,13 +42,13 @@ int GetProofMerkleRoot(uint8_t *proof, int prooflen, merkle_block *pMblock, vect
 bits256 NSPV_sapling_sighash(btc_tx *tx,int32_t vini,int64_t spendamount,uint8_t *spendscript,int32_t spendlen)
 {
     // sapling tx sighash preimage
-    uint8_t for_sig_hash[1000]; bits256 sigtxid; int32_t hashtype,version,i,len=0; btc_tx_in *vin; btc_tx_out *vout;
+    uint8_t for_sig_hash[11000]; bits256 sigtxid; int32_t hashtype,version,i,len=0; btc_tx_in *vin; btc_tx_out *vout;
     hashtype = SIGHASH_ALL;
     version = (tx->version & 0x7fffffff);
     len = iguana_rwnum(1, &for_sig_hash[len], sizeof(tx->version), &tx->version);
     len += iguana_rwnum(1, &for_sig_hash[len], sizeof(tx->nVersionGroupId), &tx->nVersionGroupId);
     {
-        uint8_t prev_outs[1000],hash_prev_outs[32]; int32_t prev_outs_len = 0;
+        uint8_t prev_outs[10000],hash_prev_outs[32]; int32_t prev_outs_len = 0;
         for (i=0; i<(int32_t)tx->vin->len; i++)
         {
             vin = btc_tx_vin(tx,i);
@@ -361,11 +361,13 @@ int64_t NSPV_addinputs(struct NSPV_utxoresp *used,btc_tx *mtx,int64_t total,int3
     else threshold = total;
     for (i=0; i<num; i++)
     {
-        if ( num < NSPV_MAXVINS || ptr[i].satoshis > threshold )
+        if ( ptr[i].satoshis > threshold )
             utxos[n++] = ptr[i];
+        if ( n >= maxinputs )
+            break;
     }
     remains = total;
-    //fprintf(stderr,"threshold %.8f n.%d for total %.8f\n",(double)threshold/COIN,n,(double)total/COIN);
+//fprintf(stderr,"threshold %.8f n.%d num.%d for total %.8f, maxvins.%d NSPV_MAXVINS.%d\n",(double)threshold/COIN,num,n,(double)total/COIN,maxinputs,NSPV_MAXVINS);
     for (i=0; i<maxinputs && n>0; i++)
     {
         below = above = 0;
@@ -383,7 +385,7 @@ int64_t NSPV_addinputs(struct NSPV_utxoresp *used,btc_tx *mtx,int64_t total,int3
             fprintf(stderr,"error finding unspent i.%d of %d, %.8f vs %.8f, abovei.%d belowi.%d ind.%d\n",i,n,(double)remains/COIN,(double)total/COIN,abovei,belowi,ind);
             return(0);
         }
-        //fprintf(stderr,"i.%d ind.%d abovei.%d belowi.%d n.%d\n",i,ind,abovei,belowi,n);
+//fprintf(stderr,"i.%d ind.%d abovei.%d belowi.%d n.%d\n",i,ind,abovei,belowi,n);
         up = &utxos[ind];
         btc_tx_add_txin(mtx,up->txid,up->vout);
         used[i] = *up;
@@ -391,7 +393,7 @@ int64_t NSPV_addinputs(struct NSPV_utxoresp *used,btc_tx *mtx,int64_t total,int3
         remains -= up->satoshis;
         utxos[ind] = utxos[--n];
         memset(&utxos[n],0,sizeof(utxos[n]));
-        //fprintf(stderr,"totalinputs %.8f vs total %.8f i.%d vs max.%d\n",(double)totalinputs/COIN,(double)total/COIN,i,maxinputs);
+//fprintf(stderr,"totalinputs %.8f vs total %.8f i.%d vs max.%d\n",(double)totalinputs/COIN,(double)total/COIN,i,maxinputs);
         if ( totalinputs >= total || (i+1) >= maxinputs )
             break;
     }
@@ -424,12 +426,13 @@ bool NSPV_SignTx(btc_tx *mtx,int32_t vini,int64_t utxovalue,cstring *scriptPubKe
         sigerr = -1;
     else
     {
-        for (i=0; i<(int32_t)siglen; i++)
-            fprintf(stderr,"%02x",sig[i]);
+        // for (i=0; i<(int32_t)siglen; i++)
+        //     fprintf(stderr,"%02x",sig[i]);
         vin = btc_tx_vin(mtx,vini);
         if ( scriptPubKey->len == 25 )
             extralen = 34;
         else extralen = 0;
+        if (vin->script_sig) cstr_free(vin->script_sig,1);
         vin->script_sig = cstr_new_sz(siglen+2+extralen);
         vin->script_sig->str[0] = siglen+1;
         memcpy(vin->script_sig->str+1,sig,siglen);
@@ -440,7 +443,7 @@ bool NSPV_SignTx(btc_tx *mtx,int32_t vini,int64_t utxovalue,cstring *scriptPubKe
             memcpy(vin->script_sig->str+2+siglen+1,NSPV_pubkey.pubkey,extralen-1);
         }
         vin->script_sig->len = siglen+2+extralen;
-        fprintf(stderr," sighash %s, sigerr.%d siglen.%d\n",bits256_str(str,sighash),sigerr,vin!=0?(int32_t)vin->script_sig->len:(int32_t)siglen);
+        //fprintf(stderr," sighash %s, sigerr.%d siglen.%d\n",bits256_str(str,sighash),sigerr,vin!=0?(int32_t)vin->script_sig->len:(int32_t)siglen);
     }
     return(true);
 }
@@ -524,7 +527,7 @@ cstring *NSPV_signtx(btc_spv_client *client,int32_t isKMD,int64_t *rewardsump,in
 
 cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t satoshis)
 {
-    cJSON *result = cJSON_CreateObject(),*retcodes = cJSON_CreateArray(); uint8_t *ptr,rmd160[128]; int32_t len,isKMD = 0; int64_t totalinputs,change,txfee = 10000; cstring *scriptPubKey=0,*hex=0; btc_tx *mtx=0,*tx=0; struct NSPV_utxoresp used[NSPV_MAXVINS]; char numstr[64]; int64_t rewardsum=0,interestsum=0;
+    cJSON *result = cJSON_CreateObject(),*retcodes = cJSON_CreateArray(); uint8_t *ptr,rmd160[128]; int32_t len,isKMD = 0; int64_t totalinputs,change,txfee = 10000; cstring *scriptPubKey=0,*hex=0; btc_tx *mtx=0,*tx=0; struct NSPV_utxoresp used[NSPV_MAXVINS+16]; char numstr[64]; int64_t rewardsum=0,interestsum=0;
     if ( NSPV_logintime == 0 || time(NULL) > NSPV_logintime+NSPV_AUTOLOGOUT )
     {
         jaddstr(result,"result","error");
@@ -593,7 +596,7 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
     if ( isKMD != 0 )
         mtx->locktime = (uint32_t)time(NULL) - 777;
     memset(used,0,sizeof(used));
-    if ( (totalinputs= NSPV_addinputs(used,mtx,satoshis+txfee,64,NSPV_utxosresult.utxos,NSPV_utxosresult.numutxos)) > 0 )
+    if ( (totalinputs= NSPV_addinputs(used,mtx,satoshis+txfee,NSPV_MAXVINS,NSPV_utxosresult.utxos,NSPV_utxosresult.numutxos)) > 0 )
     {
         change = totalinputs - (satoshis + txfee);
         btc_tx_add_txout(mtx,satoshis,scriptPubKey);
@@ -657,6 +660,7 @@ cJSON *NSPV_spend(btc_spv_client *client,char *srcaddr,char *destaddr,int64_t sa
         jaddstr(result,"lastpeer",NSPV_lastpeer);
         return(result);
     }
+    return(0);
 }
 
 #ifdef SUPPORT_CC
